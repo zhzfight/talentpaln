@@ -15,11 +15,12 @@ type Store interface {
 }
 
 // NewStore create the raft store
-func NewStore(cfg cfg.StoreCfg) (Store, error) {
-	if cfg.Memory {
-		return newMemoryStore()
+func NewStore(cfg cfg.Cfg) (Store, error) {
+
+	if cfg.Store.Memory {
+		return newMemoryStore(cfg)
 	}
 
 	// TODO: need to implement
-	return nil, nil
+	return recover()
 }

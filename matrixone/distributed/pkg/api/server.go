@@ -18,7 +18,7 @@ type Server struct {
 
 // NewServer create the server
 func NewServer(cfg cfg.Cfg) (*Server, error) {
-	s, err := store.NewStore(cfg.Store)
+	s, err := store.NewStore(cfg)
 	if err != nil {
 		return nil, err
 	}
