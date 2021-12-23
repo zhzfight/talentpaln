@@ -8,16 +8,18 @@ import (
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"log"
-	"sync"
+	"net"
+	"net/http"
+	"net/rpc"
 	"time"
 )
 
 // just for test
-type memoryStore struct {
-	sync.RWMutex
+type MemoryStore struct {
 	db      map[string][]byte
 	rn      raft.Node
 	storage *raft.MemoryStorage
+	id      uint64
 }
 
 type operateType int8
@@ -39,26 +41,32 @@ func recover() (Store, error) {
 }
 
 type Arg struct {
-	ctx context.Context
-	m   raftpb.Message
+	M raftpb.Message
 }
 type Reply struct {
+	Success bool
 }
 
-func (s *memoryStore) recv(arg *Arg, reply *Reply) error {
-	s.rn.Step(arg.ctx, arg.m)
+func (s *MemoryStore) Receive(arg *Arg, reply *Reply) error {
+	log.Print("get message ", arg.M)
+	ctx, _ := context.WithTimeout(context.Background(), 2*time.Second)
+	s.rn.Step(ctx, arg.M)
+
 	return nil
 }
 
 var addrs map[uint64]string
 
 func newMemoryStore(cfg cfg.Cfg) (Store, error) {
-	peersAddr(cfg)
-	s := memoryStore{}
+	peersAddr()
+	s := new(MemoryStore)
 	storage := raft.NewMemoryStorage()
 	s.storage = storage
+	a := cfg.API.Addr[4]
+	i := a - 48
+	s.id = uint64(i)
 	c := &raft.Config{
-		ID:              0x01,
+		ID:              s.id,
 		ElectionTick:    10,
 		HeartbeatTick:   1,
 		Storage:         storage,
@@ -67,16 +75,24 @@ func newMemoryStore(cfg cfg.Cfg) (Store, error) {
 	}
 	// Set peer list to the other nodes in the cluster.
 	// Note that they need to be started separately as well.
+	rpc.Register(s)
+	rpc.HandleHTTP()
+	l, e := net.Listen("tcp", ":8081")
+	if e != nil {
+		log.Fatal("listen error:", e)
+	}
+	go http.Serve(l, nil)
+
 	s.rn = raft.StartNode(c, []raft.Peer{{ID: 0x01}, {ID: 0x02}, {ID: 0x03}})
 	go s.handle()
 	return nil, nil
 }
 
-func (s *memoryStore) Set(key []byte, value []byte) error {
-	return s.Propose(SET, string(key), value)
+func (s *MemoryStore) Set(key []byte, value []byte) error {
+	return s.propose(SET, string(key), value)
 
 }
-func (s *memoryStore) Propose(op operateType, k string, v []byte) error {
+func (s *MemoryStore) propose(op operateType, k string, v []byte) error {
 	buf := new(bytes.Buffer)
 	e := gob.NewEncoder(buf)
 	e.Encode(operate{op, k, v})
@@ -90,9 +106,8 @@ func (s *memoryStore) Propose(op operateType, k string, v []byte) error {
 	return nil
 
 }
-func (s *memoryStore) Get(key []byte) ([]byte, error) {
-	s.RLock()
-	defer s.RUnlock()
+func (s *MemoryStore) Get(key []byte) ([]byte, error) {
+
 	k := string(key)
 	if v, ok := s.db[k]; ok {
 		return v, nil
@@ -100,11 +115,11 @@ func (s *memoryStore) Get(key []byte) ([]byte, error) {
 	return nil, nil
 }
 
-func (s *memoryStore) Delete(key []byte) error {
-	return s.Propose(DELETE, string(key), nil)
+func (s *MemoryStore) Delete(key []byte) error {
+	return s.propose(DELETE, string(key), nil)
 }
 
-func (s *memoryStore) handle() {
+func (s *MemoryStore) handle() {
 	ticker := time.NewTicker(100 * time.Millisecond).C
 	for {
 		select {
@@ -129,21 +144,37 @@ func (s *memoryStore) handle() {
 	}
 }
 
-func (s *memoryStore) processSnapshot(snapShot raftpb.Snapshot) {
+func (s *MemoryStore) processSnapshot(snapShot raftpb.Snapshot) {
 
 }
-func (s *memoryStore) saveToStorage(hardState raftpb.HardState, entries []raftpb.Entry, snapshot raftpb.Snapshot) {
+func (s *MemoryStore) saveToStorage(hardState raftpb.HardState, entries []raftpb.Entry, snapshot raftpb.Snapshot) {
 	s.storage.ApplySnapshot(snapshot)
 	s.storage.SetHardState(hardState)
 	s.storage.Append(entries)
 
 }
-func (s *memoryStore) send(messages []raftpb.Message) {
+func (s *MemoryStore) send(messages []raftpb.Message) {
 	for _, msg := range messages {
+		if msg.To == s.id {
+			continue
+		}
+		go func() {
+			log.Print("call to ", msg.To, " ", addrs[msg.To])
+			client, err := rpc.DialHTTP("tcp", addrs[msg.To])
+			if err != nil {
+				log.Fatal(err)
+			}
+			reply := Reply{}
+			err1 := client.Call("MemoryStore.Receive", Arg{M: msg}, &reply)
+			if err1 != nil {
+				log.Fatal(err1)
+			}
+
+		}()
 
 	}
 }
-func (s *memoryStore) process(entry raftpb.Entry) {
+func (s *MemoryStore) process(entry raftpb.Entry) {
 	if entry.Type == raftpb.EntryNormal {
 		r := bytes.NewBuffer(entry.Data)
 		d := gob.NewDecoder(r)
@@ -158,16 +189,10 @@ func (s *memoryStore) process(entry raftpb.Entry) {
 		}
 	}
 }
-func peersAddr(cfg cfg.Cfg) {
+func peersAddr() {
 	addrs = make(map[uint64]string)
-	if cfg.API.Addr == "node1:8080" {
-		addrs[0x02] = "node2:8080"
-		addrs[0x03] = "node3:8080"
-	} else if cfg.API.Addr == "node2:8080" {
-		addrs[0x02] = "node1:8080"
-		addrs[0x03] = "node3:8080"
-	} else {
-		addrs[0x02] = "node1:8080"
-		addrs[0x03] = "node2:8080"
-	}
+	addrs[0x01] = "node1:8081"
+	addrs[0x02] = "node2:8081"
+	addrs[0x03] = "node3:8081"
+
 }
