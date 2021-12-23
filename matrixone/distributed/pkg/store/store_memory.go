@@ -68,6 +68,7 @@ func newMemoryStore(cfg cfg.Cfg) (Store, error) {
 	// Set peer list to the other nodes in the cluster.
 	// Note that they need to be started separately as well.
 	s.rn = raft.StartNode(c, []raft.Peer{{ID: 0x01}, {ID: 0x02}, {ID: 0x03}})
+	go s.handle()
 	return nil, nil
 }
 
@@ -138,7 +139,9 @@ func (s *memoryStore) saveToStorage(hardState raftpb.HardState, entries []raftpb
 
 }
 func (s *memoryStore) send(messages []raftpb.Message) {
+	for _, msg := range messages {
 
+	}
 }
 func (s *memoryStore) process(entry raftpb.Entry) {
 	if entry.Type == raftpb.EntryNormal {
