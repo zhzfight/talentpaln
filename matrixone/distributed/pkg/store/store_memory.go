@@ -50,7 +50,7 @@ func (s *memoryStore) recv(arg *Arg, reply *Reply) error {
 	return nil
 }
 
-var addrs []string
+var addrs map[uint64]string
 
 func newMemoryStore(cfg cfg.Cfg) (Store, error) {
 	peersAddr(cfg)
@@ -67,19 +67,26 @@ func newMemoryStore(cfg cfg.Cfg) (Store, error) {
 	}
 	// Set peer list to the other nodes in the cluster.
 	// Note that they need to be started separately as well.
-	s.rn = raft.StartNode(c, []raft.Peer{{ID: 0x02}, {ID: 0x03}})
+	s.rn = raft.StartNode(c, []raft.Peer{{ID: 0x01}, {ID: 0x02}, {ID: 0x03}})
 	return nil, nil
 }
 
 func (s *memoryStore) Set(key []byte, value []byte) error {
-	s.Propose(SET, string(key), value)
-	return nil
+	return s.Propose(SET, string(key), value)
+
 }
-func (s *memoryStore) Propose(op operateType, k string, v []byte) {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(operate{op, k, v}); err != nil {
-		log.Fatal(err)
+func (s *memoryStore) Propose(op operateType, k string, v []byte) error {
+	buf := new(bytes.Buffer)
+	e := gob.NewEncoder(buf)
+	e.Encode(operate{op, k, v})
+	data := buf.Bytes()
+	ctx, _ := context.WithTimeout(context.Background(), 2*time.Second)
+	s.rn.Propose(ctx, data)
+	<-ctx.Done()
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
+	return nil
 
 }
 func (s *memoryStore) Get(key []byte) ([]byte, error) {
@@ -93,8 +100,7 @@ func (s *memoryStore) Get(key []byte) ([]byte, error) {
 }
 
 func (s *memoryStore) Delete(key []byte) error {
-	s.Propose(DELETE, string(key), nil)
-	return nil
+	return s.Propose(DELETE, string(key), nil)
 }
 
 func (s *memoryStore) handle() {
@@ -150,14 +156,15 @@ func (s *memoryStore) process(entry raftpb.Entry) {
 	}
 }
 func peersAddr(cfg cfg.Cfg) {
+	addrs = make(map[uint64]string)
 	if cfg.API.Addr == "node1:8080" {
-		addrs = append(addrs, "node2:8080")
-		addrs = append(addrs, "node3:8080")
+		addrs[0x02] = "node2:8080"
+		addrs[0x03] = "node3:8080"
 	} else if cfg.API.Addr == "node2:8080" {
-		addrs = append(addrs, "node1:8080")
-		addrs = append(addrs, "node3:8080")
+		addrs[0x02] = "node1:8080"
+		addrs[0x03] = "node3:8080"
 	} else {
-		addrs = append(addrs, "node1:8080")
-		addrs = append(addrs, "node2:8080")
+		addrs[0x02] = "node1:8080"
+		addrs[0x03] = "node2:8080"
 	}
 }
