@@ -1,9 +1,8 @@
 package cfg
 
 import (
-	"log"
-
 	"github.com/BurntSushi/toml"
+	"log"
 )
 
 // Cfg cfg

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"github.com/cockroachdb/pebble"
 	"github.com/matrixorigin/talent-challenge/matrixbase/distributed/pkg/cfg"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
@@ -11,33 +12,32 @@ import (
 	"net"
 	"net/http"
 	"net/rpc"
+	"sync"
 	"time"
 )
 
 // just for test
 type MemoryStore struct {
-	db      map[string][]byte
-	rn      raft.Node
-	storage *raft.MemoryStorage
-	id      uint64
+	db            map[string][]byte
+	rn            raft.Node
+	storage       *raft.MemoryStorage
+	id            uint64
+	mu            sync.RWMutex
+	maxEntriesNum uint16
 }
 
 type operateType int8
 
 const (
-	SET    operateType = 0
-	DELETE operateType = 1
+	SET           operateType = 0
+	DELETE        operateType = 1
+	maxEntriesNum uint16      = 100
 )
 
 type operate struct {
 	opType operateType
 	key    string
 	value  []byte
-}
-
-func recover() (Store, error) {
-
-	return nil, nil
 }
 
 type Arg struct {
@@ -56,10 +56,33 @@ func (s *MemoryStore) Receive(arg *Arg, reply *Reply) error {
 
 var addrs map[uint64]string
 
-func newMemoryStore(cfg cfg.Cfg) (Store, error) {
+func newMemoryStore(cfg cfg.Cfg, recover bool) (Store, error) {
 	peersAddr()
 	s := new(MemoryStore)
 	storage := raft.NewMemoryStorage()
+	if recover {
+		var entries []raftpb.Entry
+		var snapshot raftpb.Snapshot
+		var hardState raftpb.HardState
+		persist, err := pebble.Open("persist", &pebble.Options{})
+		if err != nil {
+			log.Fatal(err)
+		}
+		key := []byte("distributedStore")
+		value, closer, err1 := persist.Get(key)
+		defer closer.Close()
+		if err1 != nil {
+			log.Fatal(err1)
+		}
+		r := bytes.NewBuffer(value)
+		d := gob.NewDecoder(r)
+		if d.Decode(&hardState) != nil || d.Decode(&entries) != nil || d.Decode(&snapshot) != nil {
+			log.Fatal("decode persist fail")
+		}
+		storage.ApplySnapshot(snapshot)
+		storage.SetHardState(hardState)
+		storage.Append(entries)
+	}
 	s.storage = storage
 	a := cfg.API.Addr[4]
 	i := a - 48
@@ -81,10 +104,13 @@ func newMemoryStore(cfg cfg.Cfg) (Store, error) {
 		log.Fatal("listen error:", e)
 	}
 	go http.Serve(l, nil)
-
-	s.rn = raft.StartNode(c, []raft.Peer{{ID: 0x01}, {ID: 0x02}, {ID: 0x03}})
+	if recover {
+		s.rn = raft.RestartNode(c)
+	} else {
+		s.rn = raft.StartNode(c, []raft.Peer{{ID: 0x01}, {ID: 0x02}, {ID: 0x03}})
+	}
 	go s.handle()
-	return nil, nil
+	return s, nil
 }
 
 func (s *MemoryStore) Set(key []byte, value []byte) error {
@@ -102,7 +128,8 @@ func (s *MemoryStore) propose(op operateType, k string, v []byte) error {
 
 }
 func (s *MemoryStore) Get(key []byte) ([]byte, error) {
-
+	s.mu.RLocker()
+	defer s.mu.RUnlock()
 	k := string(key)
 	if v, ok := s.db[k]; ok {
 		return v, nil
@@ -140,13 +167,38 @@ func (s *MemoryStore) handle() {
 	}
 }
 
-func (s *MemoryStore) processSnapshot(snapShot raftpb.Snapshot) {
+func (s *MemoryStore) processSnapshot(snapshot raftpb.Snapshot) {
+	r := bytes.NewBuffer(snapshot.Data)
+	d := gob.NewDecoder(r)
+	var db map[string][]byte
+	if d.Decode(&db) != nil {
+		log.Fatal("decode fail")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.db = db
+	s.storage.Compact(snapshot.Metadata.Index)
 
 }
 func (s *MemoryStore) saveToStorage(hardState raftpb.HardState, entries []raftpb.Entry, snapshot raftpb.Snapshot) {
-	s.storage.ApplySnapshot(snapshot)
+
 	s.storage.SetHardState(hardState)
 	s.storage.Append(entries)
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(hardState)
+	e.Encode(entries)
+	e.Encode(snapshot)
+	data := w.Bytes()
+	persist, err := pebble.Open("persist", &pebble.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	key := []byte("distributedStore")
+	if err1 := persist.Set(key, data, pebble.Sync); err1 != nil {
+		log.Fatal(err1)
+	}
 
 }
 func (s *MemoryStore) send(messages []raftpb.Message) {
@@ -180,6 +232,8 @@ func (s *MemoryStore) process(entry raftpb.Entry) {
 			if d.Decode(&op) != nil {
 				log.Fatal("decode entry fail")
 			}
+			s.mu.Lock()
+			defer s.mu.Unlock()
 			if op.opType == SET {
 				s.db[op.key] = op.value
 			} else if op.opType == DELETE {

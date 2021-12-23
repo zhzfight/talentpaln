@@ -18,9 +18,9 @@ type Store interface {
 func NewStore(cfg cfg.Cfg) (Store, error) {
 
 	if cfg.Store.Memory {
-		return newMemoryStore(cfg)
+		return newMemoryStore(cfg, false)
 	}
 
 	// TODO: need to implement
-	return recover()
+	return newMemoryStore(cfg, true)
 }
