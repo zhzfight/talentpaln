@@ -176,17 +176,20 @@ func (s *MemoryStore) send(messages []raftpb.Message) {
 }
 func (s *MemoryStore) process(entry raftpb.Entry) {
 	if entry.Type == raftpb.EntryNormal {
-		r := bytes.NewBuffer(entry.Data)
-		d := gob.NewDecoder(r)
-		var op operate
-		if d.Decode(&op) != nil {
-			log.Fatal("decode entry fail")
+		if len(entry.Data) != 0 {
+			r := bytes.NewBuffer(entry.Data)
+			d := gob.NewDecoder(r)
+			var op operate
+			if d.Decode(&op) != nil {
+				log.Fatal("decode entry fail")
+			}
+			if op.opType == SET {
+				s.db[op.key] = op.value
+			} else if op.opType == DELETE {
+				delete(s.db, op.key)
+			}
 		}
-		if op.opType == SET {
-			s.db[op.key] = op.value
-		} else if op.opType == DELETE {
-			delete(s.db, op.key)
-		}
+
 	}
 }
 func peersAddr() {
