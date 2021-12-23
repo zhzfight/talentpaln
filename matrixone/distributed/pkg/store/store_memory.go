@@ -48,8 +48,7 @@ type Reply struct {
 }
 
 func (s *MemoryStore) Receive(arg *Arg, reply *Reply) error {
-	log.Print("get message ", arg.M)
-	ctx, _ := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, _ := context.WithTimeout(context.Background(), 1*time.Second)
 	s.rn.Step(ctx, arg.M)
 
 	return nil
@@ -99,10 +98,6 @@ func (s *MemoryStore) propose(op operateType, k string, v []byte) error {
 	data := buf.Bytes()
 	ctx, _ := context.WithTimeout(context.Background(), 2*time.Second)
 	s.rn.Propose(ctx, data)
-	<-ctx.Done()
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
 	return nil
 
 }
@@ -126,6 +121,7 @@ func (s *MemoryStore) handle() {
 		case <-ticker:
 			s.rn.Tick()
 		case rd := <-s.rn.Ready():
+
 			s.saveToStorage(rd.HardState, rd.Entries, rd.Snapshot)
 			s.send(rd.Messages)
 			if !raft.IsEmptySnap(rd.Snapshot) {
@@ -154,13 +150,14 @@ func (s *MemoryStore) saveToStorage(hardState raftpb.HardState, entries []raftpb
 
 }
 func (s *MemoryStore) send(messages []raftpb.Message) {
+
 	for _, msg := range messages {
 		if msg.To == s.id {
 			continue
 		}
-		go func() {
-			log.Print("call to ", msg.To, " ", addrs[msg.To])
+		go func(msg raftpb.Message) {
 			client, err := rpc.DialHTTP("tcp", addrs[msg.To])
+			defer client.Close()
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -170,7 +167,7 @@ func (s *MemoryStore) send(messages []raftpb.Message) {
 				log.Fatal(err1)
 			}
 
-		}()
+		}(msg)
 
 	}
 }
